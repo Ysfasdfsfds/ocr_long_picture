@@ -2,7 +2,7 @@ Global:
     text_score: 0.5
 
     use_det: true
-    use_cls: true
+    use_cls: false
     use_rec: true
 
     min_height: 30
@@ -68,7 +68,7 @@ Det:
     model_dir: null
 
     # limit_side_len: 736
-    limit_side_len: 1024
+    limit_side_len: 1200
     limit_type: min
     std: [ 0.5, 0.5, 0.5 ]
     mean: [ 0.5, 0.5, 0.5 ]

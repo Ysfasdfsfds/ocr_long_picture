@@ -14,9 +14,7 @@ from typing import List, Dict, Tuple, Any
 from rapidocr import RapidOCR
 import math
 import shutil
-from LLM_run import process_with_llm
-import re
-from sklearn.cluster import DBSCAN
+
 
 class LongImageOCR:
     def __init__(self, config_path: str = "default_rapidocr.yaml"):
@@ -249,233 +247,6 @@ class LongImageOCR:
             'image_shape': original_shape
         }
     
-    def analyze_chat_messages(self, merged_result: Dict, original_image: np.ndarray = None) -> Dict:
-        """
-        分析聊天消息，按位置和内容进行分类整理
-        
-        Args:
-            merged_result: 整合后的OCR结果
-            original_image: 原始图像，用于颜色检测
-            
-        Returns:
-            分析后的聊天消息结构
-        """
-        if not merged_result['boxes'] or not merged_result['txts']:
-            return {'messages': []}
-        
-        # 获取所有文本框的信息
-        text_boxes = []
-        for i, (box, txt, score) in enumerate(zip(
-            merged_result['boxes'], 
-            merged_result['txts'], 
-            merged_result['scores']
-        )):
-            # 计算文本框的中心点和边界
-            center_x = np.mean([p[0] for p in box])
-            center_y = np.mean([p[1] for p in box])
-            min_x = min([p[0] for p in box])
-            max_x = max([p[0] for p in box])
-            min_y = min([p[1] for p in box])
-            max_y = max([p[1] for p in box])
-            
-            # 检测文本框区域的颜色
-            is_green_box = False
-            if original_image is not None:
-                is_green_box = self._detect_green_content_box(original_image, box)
-            
-            text_boxes.append({
-                'id': i,
-                'text': txt,
-                'score': score,
-                'box': box,
-                'center_x': center_x,
-                'center_y': center_y,
-                'min_x': min_x,
-                'max_x': max_x,
-                'min_y': min_y,
-                'max_y': max_y,
-                'width': max_x - min_x,
-                'height': max_y - min_y,
-                'is_green_box': is_green_box  # 是否为绿色框
-            })
-        
-        # 1. 使用DBSCAN在Y轴上进行聚类，分成不同的消息组
-        print("步骤1: 使用DBSCAN在Y轴上进行消息分组...")
-        y_coordinates = np.array([[tb['center_y']] for tb in text_boxes])
-        
-        # DBSCAN参数：eps是邻域半径，min_samples是最小样本数
-        dbscan = DBSCAN(eps=70, min_samples=1)
-        cluster_labels = dbscan.fit_predict(y_coordinates)
-        
-        # 将文本框按聚类分组
-        clusters = {}
-        for i, label in enumerate(cluster_labels):
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(text_boxes[i])
-        
-        print(f"共分为 {len(clusters)} 个消息组")
-        
-        # 2. 对每个聚类组进行分析
-        messages = []
-        
-        for cluster_id, cluster_boxes in clusters.items():
-            if cluster_id == -1:  # 噪声点，跳过
-                continue
-                
-            print(f"分析消息组 {cluster_id}，包含 {len(cluster_boxes)} 个文本框")
-            
-            # 按center_y排序，确保消息的垂直顺序
-            cluster_boxes.sort(key=lambda x: x['center_y'])
-            
-            # 3. 根据颜色和内容特征分类文本框
-            green_boxes = []      # 绿色内容框（本人消息）
-            time_boxes = []       # 时间戳框
-            left_boxes = []       # 左侧框（昵称、头像、其他人内容）
-            
-            # 时间模式匹配
-            time_pattern = r'\d{1,2}:\d{2}|\d{4}-\d{1,2}-\d{1,2}|\d{1,2}/\d{1,2}|\d{1,2}月\d{1,2}日|上午|下午|\d{1,2}:\d{2}:\d{2}'
-            
-            for box in cluster_boxes:
-                # 首先检查是否为绿色框
-                if box['is_green_box']:
-                    green_boxes.append(box)
-                    print(f"  检测到绿色框: '{box['text']}'")
-                # 然后检查是否为时间戳
-                elif re.search(time_pattern, box['text']):
-                    time_boxes.append(box)
-                    print(f"  检测到时间框: '{box['text']}'")
-                # 其余的归为左侧框
-                else:
-                    left_boxes.append(box)
-                    print(f"  归类为左侧框: '{box['text']}'")
-            
-            # 4. 判断消息类型和提取信息
-            is_self_message = len(green_boxes) > 0  # 有绿色框则为本人消息
-            
-            # 提取时间
-            time_text = ""
-            if time_boxes:
-                # 选择最符合时间格式的文本
-                time_candidates = []
-                for box in time_boxes:
-                    if re.search(r'\d{1,2}:\d{2}', box['text']):
-                        time_candidates.append(box)
-                
-                if time_candidates:
-                    time_text = time_candidates[0]['text']
-                else:
-                    time_text = time_boxes[0]['text']
-            
-            # 5. 提取昵称和内容
-            nickname = ""
-            content_texts = []
-            
-            if is_self_message:
-                # 本人消息：昵称为"本人"，内容来自绿色框
-                nickname = "我"
-                content_texts = [box['text'] for box in sorted(green_boxes, key=lambda x: (x['center_y'], x['center_x']))]
-            else:
-                # 他人消息：从左侧框中区分昵称和内容
-                if left_boxes:
-                    # 过滤掉可能是头像的框
-                    potential_nicknames = []
-                    potential_contents = []
-                    potential_avatars = []
-                    
-                    for box in left_boxes:
-                        text = box['text'].strip()
-                        
-                        # 判断是否可能是头像框（文本很短、包含特殊符号、尺寸很小）
-                        # 只有包含特殊符号才可能是头像框
-                        if text in ['□', '○', '◯', '●', '▲', '■',"®"]:
-                            potential_avatars.append(box)
-                        # 判断是否可能是昵称（较短的有意义文本，位置靠上）
-                        elif len(text) <= 10 and re.search(r'[\u4e00-\u9fff\w]', text):
-                            potential_nicknames.append(box)
-                        # 其余的可能是内容
-                        else:
-                            potential_contents.append(box)
-                    
-                    # 选择昵称（优先选择位置最靠上且最短的有意义文本）
-                    if potential_nicknames:
-                        nickname_box = min(potential_nicknames, key=lambda x: (x['center_y'], len(x['text'])))
-                        nickname = nickname_box['text']
-                        
-                        # 从潜在内容中移除昵称框
-                        remaining_boxes = [box for box in left_boxes if box['id'] != nickname_box['id']]
-                        content_texts = [box['text'] for box in sorted(remaining_boxes, key=lambda x: (x['center_y'], x['center_x']))]
-                    else:
-                        # 没有明确的昵称，将所有非头像框的文本作为内容
-                        content_texts = [box['text'] for box in sorted(potential_contents, key=lambda x: (x['center_y'], x['center_x']))]
-                        nickname = "未知"
-            
-            # 6. 整理消息
-            if content_texts or nickname != "未知":  # 至少要有内容或有效昵称才算一条消息
-                content = ' '.join(content_texts) if content_texts else ""
-                
-                message = {
-                    'cluster_id': cluster_id,
-                    '昵称': nickname,
-                    '内容': content,
-                    'time': time_text,
-                    '是否本人': is_self_message,
-                    'message_y': min(box['center_y'] for box in cluster_boxes),
-                    'components': {
-                        'green_boxes_count': len(green_boxes),
-                        'time_boxes_count': len(time_boxes),
-                        'left_boxes_count': len(left_boxes)
-                    }
-                }
-                messages.append(message)
-                
-                print(f"  -> 昵称: {message['昵称']}")
-                print(f"  -> 内容: {message['内容'][:50]}...")
-                print(f"  -> 时间: {message['time']}")
-                print(f"  -> 本人消息: {message['是否本人']}")
-        
-        # 7. 按从上到下的顺序排序消息
-        messages.sort(key=lambda x: x['message_y'])
-        
-        # 8. 生成最终结果
-        result = {
-            'total_messages': len(messages),
-            'messages': []
-        }
-        
-        for i, msg in enumerate(messages):
-            formatted_message = {
-                'message_id': i + 1,
-                '昵称': msg['昵称'],
-                '内容': msg['内容'],
-                '时间': msg['time'],
-                '是否本人': msg['是否本人']
-            }
-            result['messages'].append(formatted_message)
-        
-        return result
-    
-    def save_chat_analysis_result(self, chat_result: Dict, image_path: str) -> str:
-        """
-        保存聊天分析结果
-        
-        Args:
-            chat_result: 聊天分析结果
-            image_path: 原始图像路径
-            
-        Returns:
-            保存的JSON文件路径
-        """
-        # 保存详细的聊天分析结果
-        image_name = Path(image_path).stem
-        json_path = self.output_json_dir / f"{image_name}_chat_analysis.json"
-        
-        with open(json_path, 'w', encoding='utf-8') as f:
-            json.dump(chat_result, f, ensure_ascii=False, indent=2)
-        
-        print(f"保存聊天分析结果: {json_path}")
-        return str(json_path)
-    
     def _is_duplicate_text(self, box1: List, txt1: str, box2: List, txt2: str, 
                           threshold: float = 50.0, iou_threshold: float = 0.5) -> bool:
         """
@@ -509,6 +280,7 @@ class LongImageOCR:
             return iou > 0.1 or distance < threshold
         
         # 2. 去除空格和标点后比较
+        import re
         clean_txt1 = re.sub(r'[^\w\u4e00-\u9fff]', '', txt1)
         clean_txt2 = re.sub(r'[^\w\u4e00-\u9fff]', '', txt2)
         
@@ -782,28 +554,11 @@ class LongImageOCR:
         # 4. 保存JSON结果
         print("步骤4: 保存JSON结果...")
         json_path = self.save_json_result(merged_result, image_path)
-
-      
         
         # 5. 可视化最终结果
         print("步骤5: 可视化最终结果...")
         vis_path = self.visualize_final_result(original_image, merged_result, image_path)
         
-        # 6. 分析聊天消息
-        print("步骤6: 分析聊天消息...")
-        chat_result = self.analyze_chat_messages(merged_result, original_image)
-        chat_json_path = self.save_chat_analysis_result(chat_result, image_path)
-        # print(f"聊天分析结果: {chat_result}")
-
-          #将结果输入到ollama模型
-        print("步骤7: 将结果输入到ollama模型...")
-        while True:
-            user_question = input("请输入你想问的问题（输入'退出'结束）：")
-            if user_question.strip() in ["退出", "q", "Q", "exit"]:
-                print("已退出与ollama模型的交互。")
-                break
-            process_with_llm(user_question, chat_result['messages'])
-
         # 返回处理摘要
         summary = {
             'input_image': image_path,
@@ -812,71 +567,15 @@ class LongImageOCR:
             'total_texts': len(merged_result['txts']),
             'json_output': json_path,
             'visualization_output': vis_path,
-            'chat_analysis_output': chat_json_path,
             'slice_images_dir': str(self.output_images_dir)
         }
         
         print("处理完成!")
         print(f"JSON结果: {json_path}")
         print(f"可视化结果: {vis_path}")
-        print(f"聊天分析结果: {chat_json_path}")
         print(f"切片图像目录: {self.output_images_dir}")
         
         return summary
-
-    def _detect_green_content_box(self, image: np.ndarray, box: List) -> bool:
-        """
-        检测文本框区域是否为绿色背景（本人消息框）
-        
-        Args:
-            image: 原始图像
-            box: 文本框坐标
-            
-        Returns:
-            是否为绿色框
-        """
-        try:
-            # 获取文本框区域
-            points = np.array(box, dtype=np.int32)
-            min_x = max(0, int(np.min(points[:, 0])))
-            max_x = min(image.shape[1], int(np.max(points[:, 0])))
-            min_y = max(0, int(np.min(points[:, 1])))
-            max_y = min(image.shape[0], int(np.max(points[:, 1])))
-            
-            if max_x <= min_x or max_y <= min_y:
-                return False
-            
-            # 提取区域图像
-            roi = image[min_y:max_y, min_x:max_x]
-            
-            if roi.size == 0:
-                return False
-            
-            # 转换为HSV颜色空间进行绿色检测
-            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-            
-            # 定义绿色的HSV范围
-            # 浅绿色范围（聊天界面中常见的绿色）
-            lower_green1 = np.array([35, 40, 40])
-            upper_green1 = np.array([85, 255, 255])
-            
-            # 创建绿色掩码
-            mask = cv2.inRange(hsv, lower_green1, upper_green1)
-            
-            # 计算绿色像素的比例
-            green_pixels = cv2.countNonZero(mask)
-            total_pixels = roi.shape[0] * roi.shape[1]
-            
-            if total_pixels > 0:
-                green_ratio = green_pixels / total_pixels
-                # 如果绿色像素超过20%，认为是绿色框
-                return green_ratio > 0.2
-            
-            return False
-            
-        except Exception as e:
-            print(f"检测绿色框时出错: {e}")
-            return False
 
 
 def main():
@@ -885,8 +584,7 @@ def main():
     processor = LongImageOCR(config_path="./default_rapidocr.yaml")
     
     # 处理长图
-    # image_path = r"images/image copy 3.png"
-    image_path = r"images/image copy 4.png"
+    image_path = r"images/long_picture.jpg"
     
     try:
         result = processor.process_long_image(image_path)
