@@ -10,21 +10,32 @@ import json
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Any
+from typing import List, Dict, Tuple, Any, Callable, Optional
 from rapidocr import RapidOCR
 import math
 import shutil
 from LLM_run import process_with_llm
 import re
-from sklearn.cluster import DBSCAN
+from sklearn.cluster import DBSCAN, AgglomerativeClustering, MeanShift, estimate_bandwidth, OPTICS
+from scipy.cluster.hierarchy import fcluster
+from scipy.spatial.distance import pdist, squareform
+
+# 尝试导入hdbscan，如果没有安装则提供友好提示
+try:
+    import hdbscan
+    HDBSCAN_AVAILABLE = True
+except ImportError:
+    HDBSCAN_AVAILABLE = False
+    print("警告: hdbscan未安装，HDBSCAN聚类功能不可用。安装命令: pip install hdbscan")
 
 class LongImageOCR:
-    def __init__(self, config_path: str = "default_rapidocr.yaml"):
+    def __init__(self, config_path: str = "default_rapidocr.yaml", clustering_method: str = "adaptive"):
         """
         初始化长图OCR处理器
         
         Args:
             config_path: RapidOCR配置文件路径
+            clustering_method: 聚类算法，可选: "dbscan", "hierarchical", "meanshift", "adaptive", "statistical", "sliding_window", "optics", "hdbscan"
         """
         self.engine = RapidOCR(config_path=config_path)
         self.slice_height = 1200  # 切片高度
@@ -36,6 +47,15 @@ class LongImageOCR:
         self.output_images_dir = Path("./output_images")
         self.output_json_dir.mkdir(exist_ok=True)
         self.output_images_dir.mkdir(exist_ok=True)
+        
+        # 聚类算法设置
+        valid_methods = ["dbscan", "hierarchical", "meanshift", "adaptive", "statistical", "sliding_window", "optics", "hdbscan"]
+        if clustering_method not in valid_methods:
+            print(f"警告: 无效的聚类方法 '{clustering_method}'，使用默认的 'adaptive' 方法")
+            clustering_method = "adaptive"
+            
+        self.clustering_method = clustering_method
+        print(f"初始化完成，使用聚类方法: {self.clustering_method}")
         
     def slice_image(self, image_path: str) -> Tuple[np.ndarray, List[Dict]]:
         """
@@ -623,35 +643,17 @@ class LongImageOCR:
                 'is_green_box': is_green_box  # 是否为绿色框
             })
         
-        # 1. 使用DBSCAN在Y轴上进行聚类，分成不同的消息组
-        print(f"  使用DBSCAN在Y轴上进行消息分组...")
-        y_coordinates = np.array([[tb['center_y']] for tb in text_boxes])
+        # 1. 使用选择的聚类算法在Y轴上进行聚类，分成不同的消息组
+        print(f"  在Y轴上进行消息分组...")
         
-        # 对于切片，使用固定的eps值（切片高度1200，设置为36像素，约3%）
-        slice_eps = 40
-        print(f"  切片高度: {self.slice_height}, 使用eps值: {slice_eps}")
-
-        # 使用固定eps值
-        dbscan = DBSCAN(eps=slice_eps, min_samples=2)
-        cluster_labels = dbscan.fit_predict(y_coordinates)
-        
-        # 将文本框按聚类分组
-        clusters = {}
-        for i, label in enumerate(cluster_labels):
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(text_boxes[i])
-        
-        print(f"  共分为 {len(clusters)} 个消息组")
+        # 对于切片，使用固定高度的聚类参数
+        clusters = self._cluster_text_boxes(text_boxes, method=self.clustering_method)
         
         # 2. 对每个聚类组进行分析
         messages = []
         
-        for cluster_id, cluster_boxes in clusters.items():
-            if cluster_id == -1:  # 噪声点，跳过
-                continue
-                
-            print(f"  分析消息组 {cluster_id}，包含 {len(cluster_boxes)} 个文本框")
+        for cluster_idx, cluster_boxes in enumerate(clusters):
+            print(f"  分析消息组 {cluster_idx}，包含 {len(cluster_boxes)} 个文本框")
             
             # 按center_y排序，确保消息的垂直顺序
             cluster_boxes.sort(key=lambda x: x['center_y'])
@@ -743,7 +745,7 @@ class LongImageOCR:
                 content = ' '.join(content_texts) if content_texts else ""
                 
                 message = {
-                    'cluster_id': cluster_id,
+                    'cluster_id': cluster_idx,
                     '昵称': nickname,
                     '内容': content,
                     'time': time_text,
@@ -820,36 +822,18 @@ class LongImageOCR:
                 'is_green_box': is_green_box  # 是否为绿色框
             })
         
-        # 1. 使用DBSCAN在Y轴上进行聚类，分成不同的消息组
-        print("步骤1: 使用DBSCAN在Y轴上进行消息分组...")
-        y_coordinates = np.array([[tb['center_y']] for tb in text_boxes])
+        # 1. 使用选择的聚类算法在Y轴上进行聚类，分成不同的消息组
+        print("步骤1: 在Y轴上进行消息分组...")
         
-        # 计算自适应eps值
-        image_height = original_image.shape[0]
-        adaptive_eps =  int(image_height * 0.003) # 图片高度的1.5%，最小值为30
-        print(f"图片高度: {image_height}, 自适应eps值: {adaptive_eps}")
-
-        # 使用自适应eps值
-        dbscan = DBSCAN(eps=adaptive_eps, min_samples=1)
-        cluster_labels = dbscan.fit_predict(y_coordinates)
-        
-        # 将文本框按聚类分组
-        clusters = {}
-        for i, label in enumerate(cluster_labels):
-            if label not in clusters:
-                clusters[label] = []
-            clusters[label].append(text_boxes[i])
-        
-        print(f"共分为 {len(clusters)} 个消息组")
+        # 对于整张图，可以考虑使用自适应参数
+        image_height = original_image.shape[0] if original_image is not None else None
+        clusters = self._cluster_text_boxes(text_boxes, method=self.clustering_method, image_height=image_height)
         
         # 2. 对每个聚类组进行分析
         messages = []
         
-        for cluster_id, cluster_boxes in clusters.items():
-            if cluster_id == -1:  # 噪声点，跳过
-                continue
-                
-            print(f"分析消息组 {cluster_id}，包含 {len(cluster_boxes)} 个文本框")
+        for cluster_idx, cluster_boxes in enumerate(clusters):
+            print(f"分析消息组 {cluster_idx}，包含 {len(cluster_boxes)} 个文本框")
             
             # 按center_y排序，确保消息的垂直顺序
             cluster_boxes.sort(key=lambda x: x['center_y'])
@@ -941,7 +925,7 @@ class LongImageOCR:
                 content = ' '.join(content_texts) if content_texts else ""
                 
                 message = {
-                    'cluster_id': cluster_id,
+                    'cluster_id': cluster_idx,
                     '昵称': nickname,
                     '内容': content,
                     'time': time_text,
@@ -1401,18 +1385,534 @@ class LongImageOCR:
             print(f"检测绿色框时出错: {e}")
             return False
 
+    def _cluster_text_boxes(self, text_boxes: List[Dict], method: str = None, image_height: int = None) -> List[List[Dict]]:
+        """
+        对文本框进行纵向聚类
+        
+        Args:
+            text_boxes: 文本框列表
+            method: 聚类方法，可选: "dbscan", "hierarchical", "meanshift", "adaptive", "statistical", "sliding_window", "optics", "hdbscan"
+            image_height: 图像高度，用于自适应参数设置
+            
+        Returns:
+            clusters: 聚类结果，每个元素是一个包含文本框的列表
+        """
+        if not text_boxes:
+            return []
+        
+        # 如果未指定方法，使用默认方法
+        if method is None:
+            method = self.clustering_method
+        
+        # 提取Y坐标
+        y_coordinates = np.array([[tb['center_y']] for tb in text_boxes])
+        
+        # 按Y坐标排序文本框
+        sorted_indices = np.argsort(y_coordinates.flatten())
+        sorted_text_boxes = [text_boxes[i] for i in sorted_indices]
+        sorted_y_coordinates = y_coordinates[sorted_indices]
+        
+        print(f"  使用 {method} 算法进行消息分组...")
+        
+        # 根据指定方法进行聚类
+        if method == "dbscan":
+            # DBSCAN聚类
+            clusters = self._dbscan_clustering(text_boxes, y_coordinates, image_height)
+        elif method == "hierarchical":
+            # 层次聚类
+            clusters = self._hierarchical_clustering(text_boxes, y_coordinates, image_height)
+        elif method == "meanshift":
+            # Mean Shift聚类
+            clusters = self._meanshift_clustering(text_boxes, y_coordinates, image_height)
+        elif method == "statistical":
+            # 基于统计的聚类
+            clusters = self._statistical_clustering(sorted_text_boxes, sorted_y_coordinates)
+        elif method == "sliding_window":
+            # 滑动窗口动态阈值聚类
+            clusters = self._sliding_window_clustering(sorted_text_boxes, sorted_y_coordinates)
+        elif method == "optics":
+            # OPTICS聚类
+            clusters = self._optics_clustering(text_boxes, y_coordinates, image_height)
+        elif method == "hdbscan":
+            # HDBSCAN聚类
+            clusters = self._hdbscan_clustering(text_boxes, y_coordinates, image_height)
+        else:  # "adaptive" 或其他
+            # 自适应阈值聚类 (默认)
+            clusters = self._adaptive_clustering(sorted_text_boxes, sorted_y_coordinates)
+            
+        # 打印聚类结果
+        valid_clusters = [c for c in clusters if c]  # 移除空聚类
+        print(f"  共分为 {len(valid_clusters)} 个消息组")
+        
+        return valid_clusters
+    
+    def _dbscan_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray, image_height: int) -> List[List[Dict]]:
+        """
+        使用DBSCAN进行聚类
+        """
+        # 计算适合的eps参数
+        if image_height and image_height > self.slice_height:
+            # 全图模式使用自适应eps
+            eps = max(30, int(image_height * 0.003))  # 图片高度的0.3%，最小30像素
+            print(f"  图片高度: {image_height}, 自适应eps值: {eps}")
+        else:
+            # 切片模式使用固定eps
+            eps = 1200//len(text_boxes)+10# 对于1200高度的切片，40像素为经验值
+            print(f"  切片高度: {self.slice_height}, 使用eps值: {eps}")
+        
+        # 运行DBSCAN
+        dbscan = DBSCAN(eps=eps, min_samples=2)
+        cluster_labels = dbscan.fit_predict(y_coordinates)
+        
+        # 组织聚类结果
+        clusters = {}
+        for i, label in enumerate(cluster_labels):
+            if label == -1:  # 噪声点单独成组
+                clusters[len(clusters)] = [text_boxes[i]]
+            else:
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(text_boxes[i])
+        
+        return list(clusters.values())
+    
+    def _hierarchical_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray, image_height: int) -> List[List[Dict]]:
+        """
+        使用层次聚类
+        """
+        # 计算适合的距离阈值
+        if image_height and image_height > self.slice_height:
+            distance_threshold = max(30, int(image_height * 0.003))
+        else:
+            distance_threshold = 40
+        print(f"  层次聚类距离阈值: {distance_threshold}")
+        
+        # 计算距离矩阵
+        if len(text_boxes) > 1:
+            # 使用层次聚类
+            clustering = AgglomerativeClustering(
+                n_clusters=None, 
+                distance_threshold=distance_threshold,
+                linkage='single',
+                metric='euclidean'
+            )
+            cluster_labels = clustering.fit_predict(y_coordinates)
+            
+            # 组织聚类结果
+            clusters = {}
+            for i, label in enumerate(cluster_labels):
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(text_boxes[i])
+            
+            return list(clusters.values())
+        else:
+            # 只有一个文本框
+            return [text_boxes]
+    
+    def _meanshift_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray, image_height: int) -> List[List[Dict]]:
+        """
+        使用Mean Shift聚类
+        """
+        # 估计带宽
+        if len(y_coordinates) > 1:
+            try:
+                bandwidth = estimate_bandwidth(y_coordinates, quantile=0.2, n_samples=min(len(y_coordinates), 500))
+                if bandwidth == 0:  # 处理极端情况
+                    bandwidth = 40
+            except Exception as e:
+                print(f"  带宽估计失败: {e}, 使用默认值")
+                bandwidth = 40
+        else:
+            bandwidth = 40
+        
+        print(f"  Mean Shift带宽: {bandwidth}")
+        
+        # 执行Mean Shift聚类
+        if len(text_boxes) > 1:
+            ms = MeanShift(bandwidth=bandwidth, bin_seeding=True)
+            cluster_labels = ms.fit_predict(y_coordinates)
+            
+            # 组织聚类结果
+            clusters = {}
+            for i, label in enumerate(cluster_labels):
+                if label not in clusters:
+                    clusters[label] = []
+                clusters[label].append(text_boxes[i])
+            
+            return list(clusters.values())
+        else:
+            # 只有一个文本框
+            return [text_boxes]
+    
+    def _statistical_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray) -> List[List[Dict]]:
+        """
+        基于统计的聚类
+        """
+        if len(text_boxes) <= 1:
+            return [text_boxes] if text_boxes else []
+        
+        # 计算相邻Y坐标之间的差值
+        y_values = y_coordinates.flatten()
+        y_diffs = np.diff(y_values)
+        
+        if len(y_diffs) == 0:
+            return [text_boxes]
+        
+        # 计算差值的均值和标准差
+        mean_diff = np.mean(y_diffs)
+        std_diff = np.std(y_diffs)
+        
+        # 动态阈值 = 均值 + 1.5倍标准差
+        threshold = mean_diff + 1.5 * std_diff
+        threshold = max(threshold, 30)  # 最小阈值30像素
+        print(f"  统计聚类阈值: {threshold:.1f} (均值: {mean_diff:.1f}, 标准差: {std_diff:.1f})")
+        
+        # 使用动态阈值进行聚类
+        clusters = []
+        current_cluster = [text_boxes[0]]
+        
+        for i in range(1, len(text_boxes)):
+            y_diff = y_values[i] - y_values[i-1]
+            if y_diff > threshold:
+                # 开始新的聚类
+                clusters.append(current_cluster)
+                current_cluster = [text_boxes[i]]
+            else:
+                # 添加到当前聚类
+                current_cluster.append(text_boxes[i])
+                
+        # 添加最后一个聚类
+        if current_cluster:
+            clusters.append(current_cluster)
+        
+        return clusters
+        
+    def _adaptive_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray) -> List[List[Dict]]:
+        """
+        自适应阈值聚类
+        """
+        if len(text_boxes) <= 1:
+            return [text_boxes] if text_boxes else []
+        
+        # 初始化参数
+        min_gap = 30  # 最小间隔
+        y_values = y_coordinates.flatten()
+        
+        # 查找所有间隔
+        y_diffs = []
+        for i in range(1, len(y_values)):
+            y_diff = y_values[i] - y_values[i-1]
+            if y_diff > min_gap:  # 忽略太小的间隔
+                y_diffs.append(y_diff)
+        
+        if not y_diffs:
+            return [text_boxes]  # 无法分组时返回单个组
+        
+        # 计算间隔的分布
+        y_diffs = np.array(y_diffs)
+        y_diffs_sorted = np.sort(y_diffs)
+        
+        # 查找间隙的突变点作为阈值（使用差分）
+        if len(y_diffs_sorted) > 3:  # 至少需要4个点来查找明显的突变
+            diffs_of_diffs = np.diff(y_diffs_sorted)
+            # 找最大突变点，或者前25%和后75%的分界点
+            try:
+                max_change_idx = np.argmax(diffs_of_diffs)
+                threshold = y_diffs_sorted[max_change_idx]
+                if threshold < min_gap:
+                    # 使用分位数作为备选
+                    threshold = np.percentile(y_diffs_sorted, 75)
+            except:
+                threshold = np.percentile(y_diffs_sorted, 75)
+        else:
+            # 样本太少，使用简单统计
+            threshold = np.mean(y_diffs) + np.std(y_diffs)
+        
+        # 确保阈值合理
+        threshold = max(threshold, min_gap)
+        print(f"  自适应聚类阈值: {threshold:.1f}")
+        
+        # 使用自适应阈值进行聚类
+        clusters = []
+        current_cluster = [text_boxes[0]]
+        
+        for i in range(1, len(text_boxes)):
+            y_diff = y_values[i] - y_values[i-1]
+            if y_diff > threshold:
+                # 开始新的聚类
+                clusters.append(current_cluster)
+                current_cluster = [text_boxes[i]]
+            else:
+                # 添加到当前聚类
+                current_cluster.append(text_boxes[i])
+                
+        # 添加最后一个聚类
+        if current_cluster:
+            clusters.append(current_cluster)
+        
+        return clusters
+
+    def _sliding_window_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray) -> List[List[Dict]]:
+        """
+        使用滑动窗口动态阈值聚类
+        在聚类过程中，为每个判断点使用局部窗口内的统计特性计算阈值
+        """
+        if len(text_boxes) <= 1:
+            return [text_boxes] if text_boxes else []
+        
+        # 初始化参数
+        min_gap = 30  # 最小间隔
+        window_size = min(20, len(text_boxes))  # 窗口大小，最大20个点或全部点
+        half_window = window_size // 2  # 半窗口大小
+        y_values = y_coordinates.flatten()
+        
+        print(f"  滑动窗口聚类，窗口大小: {window_size}")
+        
+        # 使用滑动窗口动态阈值聚类
+        clusters = []
+        current_cluster = [text_boxes[0]]
+        thresholds = []  # 记录每个决策点的阈值
+        
+        for i in range(1, len(text_boxes)):
+            # 计算局部窗口的范围
+            start_idx = max(0, i - half_window)
+            end_idx = min(len(text_boxes), i + half_window)
+            
+            # 提取局部窗口内的Y坐标
+            local_y_values = y_values[start_idx:end_idx]
+            
+            # 计算局部窗口内相邻Y坐标的差值
+            if len(local_y_values) > 1:
+                local_y_diffs = np.diff(local_y_values)
+                
+                if len(local_y_diffs) > 0:
+                    # 计算局部差值的均值和标准差
+                    local_mean_diff = np.mean(local_y_diffs)
+                    local_std_diff = np.std(local_y_diffs)
+                    
+                    # 局部动态阈值 = 局部均值 + 1.5倍局部标准差
+                    local_threshold = local_mean_diff + 1.5 * local_std_diff
+                    local_threshold = max(local_threshold, min_gap)  # 确保阈值不小于最小间隔
+                else:
+                    local_threshold = min_gap
+            else:
+                local_threshold = min_gap
+            
+            # 记录使用的阈值
+            thresholds.append(local_threshold)
+            
+            # 当前点与前一点的Y差值
+            y_diff = y_values[i] - y_values[i-1]
+            
+            # 使用局部阈值进行判断
+            if y_diff > local_threshold:
+                # 开始新的聚类
+                clusters.append(current_cluster)
+                current_cluster = [text_boxes[i]]
+                print(f"    位置 {i}: Y差值 {y_diff:.1f} > 局部阈值 {local_threshold:.1f}，开始新聚类")
+            else:
+                # 添加到当前聚类
+                current_cluster.append(text_boxes[i])
+        
+        # 添加最后一个聚类
+        if current_cluster:
+            clusters.append(current_cluster)
+        
+        # 输出阈值统计
+        if thresholds:
+            print(f"  局部阈值统计: 最小值={min(thresholds):.1f}, 最大值={max(thresholds):.1f}, 均值={np.mean(thresholds):.1f}")
+        
+        return clusters
+
+    def _optics_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray, image_height: int = None) -> List[List[Dict]]:
+        """
+        使用OPTICS进行聚类（Ordering Points To Identify the Clustering Structure）
+        OPTICS是DBSCAN的改进版，能够处理不同密度的聚类，不需要指定固定的eps参数
+        
+        Args:
+            text_boxes: 文本框列表
+            y_coordinates: Y坐标数组，形状为(n_samples, 1)
+            image_height: 图像高度
+            
+        Returns:
+            clusters: 聚类结果
+        """
+        if len(text_boxes) <= 1:
+            return [text_boxes] if text_boxes else []
+        
+        # 设置最小样本数
+        min_samples = 2
+        
+        # 计算最大邻域半径
+        if image_height and image_height > self.slice_height:
+            # 对于整图使用自适应参数
+            max_eps = max(100, int(image_height * 0.01))  # 图像高度的1%，至少100像素
+        else:
+            # 对于切片使用固定参数
+            max_eps = 100  # 对于1200高度的切片，100像素为较宽松值
+            
+        print(f"  OPTICS聚类参数: min_samples={min_samples}, max_eps={max_eps}")
+        
+        # 运行OPTICS聚类
+        optics = OPTICS(
+            min_samples=min_samples,
+            max_eps=max_eps, 
+            metric='euclidean',
+            cluster_method='xi',  # 使用xi方法自动提取聚类
+            xi=0.05              # 相对较小的xi值以获取更多聚类
+        )
+        
+        try:
+            # 拟合模型并获取聚类标签
+            cluster_labels = optics.fit_predict(y_coordinates)
+            
+            # 输出可达性距离的统计信息，帮助调整参数
+            if hasattr(optics, 'reachability_') and optics.reachability_ is not None:
+                reach_distances = optics.reachability_[optics.reachability_ != np.inf]
+                if len(reach_distances) > 0:
+                    print(f"  可达性距离统计: 最小={np.min(reach_distances):.1f}, "
+                          f"最大={np.max(reach_distances):.1f}, 均值={np.mean(reach_distances):.1f}")
+            
+            # 统计聚类数量和噪声点
+            n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+            n_noise = list(cluster_labels).count(-1)
+            print(f"  OPTICS聚类结果: {n_clusters} 个聚类, {n_noise} 个噪声点")
+            
+            # 组织聚类结果
+            clusters = {}
+            for i, label in enumerate(cluster_labels):
+                if label == -1:  # 噪声点单独成组
+                    clusters[len(clusters)] = [text_boxes[i]]
+                else:
+                    if label not in clusters:
+                        clusters[label] = []
+                    clusters[label].append(text_boxes[i])
+            
+            return list(clusters.values())
+            
+        except Exception as e:
+            print(f"  OPTICS聚类失败: {e}，尝试使用备用方法...")
+            # 聚类失败时使用统计聚类作为备用
+            return self._statistical_clustering(text_boxes, y_coordinates)
+
+    def _hdbscan_clustering(self, text_boxes: List[Dict], y_coordinates: np.ndarray, image_height: int = None) -> List[List[Dict]]:
+        """
+        使用HDBSCAN进行聚类（Hierarchical Density-Based Spatial Clustering of Applications with Noise）
+        HDBSCAN是DBSCAN的层次化改进版，完全无需eps参数，只需要min_cluster_size
+        对于聊天消息聚类是最佳选择
+        
+        Args:
+            text_boxes: 文本框列表
+            y_coordinates: Y坐标数组，形状为(n_samples, 1)
+            image_height: 图像高度（用于参数自适应）
+            
+        Returns:
+            clusters: 聚类结果
+        """
+        if not HDBSCAN_AVAILABLE:
+            print("  HDBSCAN不可用，回退到统计聚类方法")
+            return self._statistical_clustering(text_boxes, y_coordinates)
+            
+        if len(text_boxes) <= 1:
+            return [text_boxes] if text_boxes else []
+        
+        # 设置HDBSCAN参数
+        min_cluster_size = 2    # 最小聚类大小，聊天消息至少2个文本框成组
+        min_samples = 1         # 最小样本数，设为1以便检测单独的消息
+        
+        # 根据数据量动态调整参数
+        if len(text_boxes) > 20:
+            min_cluster_size = max(2, len(text_boxes) // 10)  # 对于大量文本，增加最小聚类大小
+        
+        print(f"  HDBSCAN聚类参数: min_cluster_size={min_cluster_size}, min_samples={min_samples}")
+        
+        try:
+            # 创建HDBSCAN聚类器
+            clusterer = hdbscan.HDBSCAN(
+                min_cluster_size=2,
+                min_samples=1,
+                alpha=0.9,  # 微信场景特殊参数
+                metric='euclidean',
+                cluster_selection_method='leaf',  # 微信场景推荐leaf
+                allow_single_cluster=False
+            )
+            
+            # 执行聚类
+            cluster_labels = clusterer.fit_predict(y_coordinates)
+            
+            # 输出聚类稳定性信息
+            if hasattr(clusterer, 'cluster_persistence_') and clusterer.cluster_persistence_ is not None:
+                persistence_scores = clusterer.cluster_persistence_
+                if len(persistence_scores) > 0:
+                    print(f"  聚类稳定性得分: 最小={np.min(persistence_scores):.3f}, "
+                          f"最大={np.max(persistence_scores):.3f}, 均值={np.mean(persistence_scores):.3f}")
+            
+            # 输出聚类概率信息（HDBSCAN的优势之一）
+            if hasattr(clusterer, 'probabilities_') and clusterer.probabilities_ is not None:
+                prob_scores = clusterer.probabilities_
+                low_confidence = np.sum(prob_scores < 0.5)
+                print(f"  聚类置信度: 低置信度点={low_confidence}/{len(prob_scores)}, "
+                      f"平均置信度={np.mean(prob_scores):.3f}")
+            
+            # 统计聚类结果
+            n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+            n_noise = list(cluster_labels).count(-1)
+            print(f"  HDBSCAN聚类结果: {n_clusters} 个聚类, {n_noise} 个噪声点")
+            
+            # 如果只产生了一个大聚类，尝试调整参数重新聚类
+            if n_clusters <= 1 and len(text_boxes) > 5:
+                print("  检测到过度聚类，尝试减小min_cluster_size参数")
+                clusterer_refined = hdbscan.HDBSCAN(
+                    min_cluster_size=2,
+                    min_samples=3,
+                    alpha=0.9,  # 微信场景特殊参数
+                    metric='euclidean',
+                    cluster_selection_method='leaf',  # 微信场景推荐leaf
+                    allow_single_cluster=False
+                )
+                cluster_labels = clusterer_refined.fit_predict(y_coordinates)
+                n_clusters = len(set(cluster_labels)) - (1 if -1 in cluster_labels else 0)
+                n_noise = list(cluster_labels).count(-1)
+                print(f"  调整后聚类结果: {n_clusters} 个聚类, {n_noise} 个噪声点")
+            
+            # 组织聚类结果
+            clusters = {}
+            for i, label in enumerate(cluster_labels):
+                if label == -1:  # 噪声点单独成组
+                    clusters[f"noise_{i}"] = [text_boxes[i]]
+                else:
+                    if label not in clusters:
+                        clusters[label] = []
+                    clusters[label].append(text_boxes[i])
+            
+            return list(clusters.values())
+            
+        except Exception as e:
+            print(f"  HDBSCAN聚类失败: {e}，回退到统计聚类方法")
+            # 聚类失败时使用统计聚类作为备用
+            return self._statistical_clustering(text_boxes, y_coordinates)
+
 
 def main():
     """主函数"""
-    # 初始化处理器
-    processor = LongImageOCR(config_path="./default_rapidocr.yaml")
+    import argparse
     
-    # 处理长图
-    # image_path = r"images/image copy 3.png"
-    image_path = r"images/image copy 7.png"
+    # 命令行参数解析
+    parser = argparse.ArgumentParser(description='长图OCR处理工具')
+    parser.add_argument('--image', type=str, default="images/image copy 5.png", help='要处理的图像路径')
+    parser.add_argument('--config', type=str, default="./default_rapidocr.yaml", help='RapidOCR配置文件路径')
+    parser.add_argument('--clustering', type=str, default="optics", 
+                       choices=["dbscan", "hierarchical", "meanshift", "adaptive", "statistical", "sliding_window", "optics", "hdbscan"],
+                       help='聚类算法选择')
+    args = parser.parse_args()
+    
+    # 初始化处理器
+    processor = LongImageOCR(config_path=args.config, clustering_method=args.clustering)
     
     try:
-        result = processor.process_long_image(image_path)
+        print(f"使用 {args.clustering} 聚类算法处理图像: {args.image}")
+        result = processor.process_long_image(args.image)
         print("\n处理结果摘要:")
         for key, value in result.items():
             print(f"  {key}: {value}")
