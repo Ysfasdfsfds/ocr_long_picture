@@ -1,0 +1,513 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>长图OCR系统架构 - 分层设计</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        
+        body {
+            font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
+            background: linear-gradient(135deg, #1e3c72 0%, #2a5298 100%);
+            color: #ffffff;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+        
+        .header {
+            text-align: center;
+            margin-bottom: 50px;
+        }
+        
+        .title {
+            font-size: 36px;
+            font-weight: 300;
+            color: #ffffff;
+            margin-bottom: 10px;
+            letter-spacing: 2px;
+        }
+        
+        .subtitle {
+            font-size: 16px;
+            color: #b8d4f0;
+            font-weight: 300;
+        }
+        
+        .architecture-stack {
+            display: flex;
+            flex-direction: column;
+            gap: 0;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 20px;
+            padding: 30px;
+            backdrop-filter: blur(10px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
+        }
+        
+        .layer {
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.05));
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 15px;
+            padding: 30px;
+            margin-bottom: 20px;
+            position: relative;
+            transition: all 0.3s ease;
+            overflow: hidden;
+        }
+        
+        .layer:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 15px 30px rgba(0, 0, 0, 0.2);
+            background: linear-gradient(135deg, rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.08));
+        }
+        
+        .layer::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 4px;
+            border-radius: 15px 15px 0 0;
+        }
+        
+        .layer-1::before { background: linear-gradient(90deg, #4facfe, #00f2fe); }
+        .layer-2::before { background: linear-gradient(90deg, #43e97b, #38f9d7); }
+        .layer-3::before { background: linear-gradient(90deg, #fa709a, #fee140); }
+        .layer-4::before { background: linear-gradient(90deg, #a8edea, #fed6e3); }
+        .layer-5::before { background: linear-gradient(90deg, #ffecd2, #fcb69f); }
+        
+        .layer-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 25px;
+        }
+        
+        .layer-title {
+            font-size: 24px;
+            font-weight: 600;
+            color: #ffffff;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+        }
+        
+        .layer-number {
+            background: rgba(255, 255, 255, 0.2);
+            width: 40px;
+            height: 40px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-weight: bold;
+            font-size: 18px;
+        }
+        
+        .layer-purpose {
+            font-size: 14px;
+            color: #b8d4f0;
+            background: rgba(255, 255, 255, 0.1);
+            padding: 8px 16px;
+            border-radius: 20px;
+            border: 1px solid rgba(255, 255, 255, 0.2);
+        }
+        
+        .layer-content {
+            display: grid;
+            grid-template-columns: 1fr 2fr;
+            gap: 30px;
+            align-items: center;
+        }
+        
+        .layer-description {
+            font-size: 16px;
+            line-height: 1.6;
+            color: #e8f4f8;
+        }
+        
+        .layer-components {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 12px;
+        }
+        
+        .component {
+            background: rgba(255, 255, 255, 0.15);
+            padding: 10px 16px;
+            border-radius: 25px;
+            font-size: 13px;
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 0.3);
+            transition: all 0.3s ease;
+        }
+        
+        .component:hover {
+            background: rgba(255, 255, 255, 0.25);
+            transform: translateY(-2px);
+        }
+        
+        .layer-connection {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 60px;
+            position: relative;
+        }
+        
+        .connection-line {
+            width: 3px;
+            height: 40px;
+            background: linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.2));
+            border-radius: 2px;
+            position: relative;
+        }
+        
+        .connection-arrow {
+            position: absolute;
+            top: -6px;
+            left: 50%;
+            transform: translateX(-50%);
+            width: 0;
+            height: 0;
+            border-left: 8px solid transparent;
+            border-right: 8px solid transparent;
+            border-bottom: 12px solid rgba(255, 255, 255, 0.6);
+        }
+        
+        .data-flow-info {
+            position: absolute;
+            left: 50px;
+            top: 50%;
+            transform: translateY(-50%);
+            background: rgba(0, 0, 0, 0.7);
+            padding: 8px 12px;
+            border-radius: 8px;
+            font-size: 12px;
+            color: #ffffff;
+            opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        
+        .layer-connection:hover .data-flow-info {
+            opacity: 1;
+        }
+        
+        .system-overview {
+            background: rgba(255, 255, 255, 0.08);
+            border-radius: 15px;
+            padding: 25px;
+            margin-top: 30px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+        }
+        
+        .overview-title {
+            font-size: 20px;
+            font-weight: 600;
+            color: #ffffff;
+            margin-bottom: 15px;
+            text-align: center;
+        }
+        
+        .overview-content {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 20px;
+        }
+        
+        .overview-item {
+            text-align: center;
+            padding: 20px;
+            background: rgba(255, 255, 255, 0.05);
+            border-radius: 10px;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+        
+        .overview-icon {
+            font-size: 32px;
+            margin-bottom: 10px;
+        }
+        
+        .overview-label {
+            font-size: 14px;
+            color: #b8d4f0;
+            margin-bottom: 5px;
+        }
+        
+        .overview-value {
+            font-size: 18px;
+            font-weight: 600;
+            color: #ffffff;
+        }
+        
+        @media (max-width: 768px) {
+            .layer-content {
+                grid-template-columns: 1fr;
+                gap: 20px;
+            }
+            
+            .layer-title {
+                font-size: 20px;
+            }
+            
+            .title {
+                font-size: 28px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1 class="title">长图OCR系统架构</h1>
+            <div class="subtitle">分层设计 · 职责分离 · 数据流转</div>
+        </div>
+        
+        <div class="architecture-stack">
+            <!-- 第5层：数据输出层 -->
+            <div class="layer layer-5">
+                <div class="layer-header">
+                    <div class="layer-title">
+                        <div class="layer-number">5</div>
+                        数据输出层
+                    </div>
+                    <div class="layer-purpose">结果导出与持久化</div>
+                </div>
+                <div class="layer-content">
+                    <div class="layer-description">
+                        负责将处理完成的结构化数据导出为标准格式，提供调试信息和统计报告，确保数据的可读性和可用性。
+                    </div>
+                    <div class="layer-components">
+                        <div class="component">data_exporter.py</div>
+                        <div class="component">JSON序列化</div>
+                        <div class="component">调试图像</div>
+                        <div class="component">统计报告</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="layer-connection">
+                <div class="connection-line">
+                    <div class="connection-arrow"></div>
+                </div>
+                <div class="data-flow-info">结构化数据 ↑</div>
+            </div>
+            
+            <!-- 第4层：自然语言处理层 -->
+            <div class="layer layer-4">
+                <div class="layer-header">
+                    <div class="layer-title">
+                        <div class="layer-number">4</div>
+                        自然语言处理层
+                    </div>
+                    <div class="layer-purpose">文本分析与组织</div>
+                </div>
+                <div class="layer-content">
+                    <div class="layer-description">
+                        对识别出的文本进行智能分析，包括去重、分类、结构化组织，将原始文本转换为有意义的聊天消息结构。
+                    </div>
+                    <div class="layer-components">
+                        <div class="component">deduplicator.py</div>
+                        <div class="component">content_marker.py</div>
+                        <div class="component">chat_organizer.py</div>
+                        <div class="component">文本去重</div>
+                        <div class="component">内容分类</div>
+                        <div class="component">消息组织</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="layer-connection">
+                <div class="connection-line">
+                    <div class="connection-arrow"></div>
+                </div>
+                <div class="data-flow-info">原始文本 ↑</div>
+            </div>
+            
+            <!-- 第3层：计算机视觉层 -->
+            <div class="layer layer-3">
+                <div class="layer-header">
+                    <div class="layer-title">
+                        <div class="layer-number">3</div>
+                        计算机视觉层
+                    </div>
+                    <div class="layer-purpose">图像分析与文字识别</div>
+                </div>
+                <div class="layer-content">
+                    <div class="layer-description">
+                        运用计算机视觉技术对图像进行深度分析，包括图像分割、头像检测、文字区域定位和OCR识别，是系统的核心处理层。
+                    </div>
+                    <div class="layer-components">
+                        <div class="component">image_slicer.py</div>
+                        <div class="component">avatar_detector.py</div>
+                        <div class="component">process_avatar.py</div>
+                        <div class="component">ocr_processor.py</div>
+                        <div class="component">图像分割</div>
+                        <div class="component">头像识别</div>
+                        <div class="component">OCR引擎</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="layer-connection">
+                <div class="connection-line">
+                    <div class="connection-arrow"></div>
+                </div>
+                <div class="data-flow-info">预处理图像 ↑</div>
+            </div>
+            
+            <!-- 第2层：核心控制层 -->
+            <div class="layer layer-2">
+                <div class="layer-header">
+                    <div class="layer-title">
+                        <div class="layer-number">2</div>
+                        核心控制层
+                    </div>
+                    <div class="layer-purpose">流程编排与配置管理</div>
+                </div>
+                <div class="layer-content">
+                    <div class="layer-description">
+                        系统的大脑，负责协调各个处理模块，管理处理流程，加载配置参数，确保整个系统按照预定逻辑有序运行。包含主控制器、配置管理、状态监控、异常处理等核心功能。
+                    </div>
+                    <div class="layer-components">
+                        <div class="component">🎯 LongImageOCR主控制器</div>
+                        <div class="component">⚙️ Config配置管理</div>
+                        <div class="component">🔄 流程编排引擎</div>
+                        <div class="component">🤝 模块协调器</div>
+                        <div class="component">📊 状态监控</div>
+                        <div class="component">🛡️ 异常处理</div>
+                        <div class="component">💾 资源管理</div>
+                        <div class="component">✅ 参数验证</div>
+                        <div class="component">📝 日志记录</div>
+                        <div class="component">⚡ 性能监控</div>
+                        <div class="component">🔧 初始化管理</div>
+                        <div class="component">📈 进度跟踪</div>
+                        <div class="component">🔀 数据路由</div>
+                        <div class="component">🎛️ 参数调优</div>
+                        <div class="component">🔍 质量控制</div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="layer-connection">
+                <div class="connection-line">
+                    <div class="connection-arrow"></div>
+                </div>
+                <div class="data-flow-info">控制指令 ↑</div>
+            </div>
+            
+            <!-- 第1层：输入接口层 -->
+            <div class="layer layer-1">
+                <div class="layer-header">
+                    <div class="layer-title">
+                        <div class="layer-number">1</div>
+                        输入接口层
+                    </div>
+                    <div class="layer-purpose">系统入口与资源加载</div>
+                </div>
+                <div class="layer-content">
+                    <div class="layer-description">
+                        系统的入口点，负责接收用户输入，加载图像文件和配置参数，为整个处理流程提供必要的初始化资源。
+                    </div>
+                    <div class="layer-components">
+                        <div class="component">main.py</div>
+                        <div class="component">图像文件</div>
+                        <div class="component">配置文件</div>
+                        <div class="component">系统初始化</div>
+                        <div class="component">资源加载</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <!-- 系统概览 -->
+        <div class="system-overview">
+            <div class="overview-title">系统特性概览</div>
+            <div class="overview-content">
+                <div class="overview-item">
+                    <div class="overview-icon">🏗️</div>
+                    <div class="overview-label">架构模式</div>
+                    <div class="overview-value">分层架构</div>
+                </div>
+                <div class="overview-item">
+                    <div class="overview-icon">🔄</div>
+                    <div class="overview-label">数据流向</div>
+                    <div class="overview-value">自下而上</div>
+                </div>
+                <div class="overview-item">
+                    <div class="overview-icon">⚡</div>
+                    <div class="overview-label">处理方式</div>
+                    <div class="overview-value">流水线式</div>
+                </div>
+                <div class="overview-item">
+                    <div class="overview-icon">🧩</div>
+                    <div class="overview-label">设计原则</div>
+                    <div class="overview-value">模块化</div>
+                </div>
+                <div class="overview-item">
+                    <div class="overview-icon">🎯</div>
+                    <div class="overview-label">职责分离</div>
+                    <div class="overview-value">单一职责</div>
+                </div>
+                <div class="overview-item">
+                    <div class="overview-icon">📊</div>
+                    <div class="overview-label">输出格式</div>
+                    <div class="overview-value">结构化JSON</div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <script>
+        // 添加层级交互效果
+        document.querySelectorAll('.layer').forEach((layer, index) => {
+            layer.addEventListener('mouseenter', function() {
+                // 高亮当前层
+                this.style.transform = 'translateY(-8px) scale(1.02)';
+                
+                // 显示数据流向
+                const connections = document.querySelectorAll('.layer-connection');
+                connections.forEach((conn, connIndex) => {
+                    if (connIndex >= index) {
+                        conn.style.opacity = '1';
+                        const line = conn.querySelector('.connection-line');
+                        line.style.background = 'linear-gradient(180deg, #4facfe, #00f2fe)';
+                    }
+                });
+            });
+            
+            layer.addEventListener('mouseleave', function() {
+                this.style.transform = 'translateY(0) scale(1)';
+                
+                // 恢复连接线样式
+                const connections = document.querySelectorAll('.layer-connection');
+                connections.forEach(conn => {
+                    const line = conn.querySelector('.connection-line');
+                    line.style.background = 'linear-gradient(180deg, rgba(255, 255, 255, 0.6), rgba(255, 255, 255, 0.2))';
+                });
+            });
+        });
+        
+        // 添加组件点击效果
+        document.querySelectorAll('.component').forEach(component => {
+            component.addEventListener('click', function() {
+                this.style.background = 'rgba(255, 255, 255, 0.4)';
+                setTimeout(() => {
+                    this.style.background = 'rgba(255, 255, 255, 0.15)';
+                }, 300);
+            });
+        });
+    </script>
+</body>
+</html>

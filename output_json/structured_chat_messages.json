@@ -1,0 +1,59 @@
+{
+  "metadata": {
+    "export_time": "2025-07-31T16:58:34.573379",
+    "total_messages": 9,
+    "description": "结构化聊天消息 - 按昵称、内容、时间组织"
+  },
+  "chat_messages": [
+    {
+      "type": "unknown",
+      "content": "AI研发部(新) (21)"
+    },
+    {
+      "type": "chat",
+      "昵称": "王伟男 麒麟",
+      "内容": "对，智能搜索的场景服务"
+    },
+    {
+      "type": "time",
+      "time": "昨天21:47"
+    },
+    {
+      "type": "chat",
+      "昵称": "宁哥 麒麟",
+      "内容": "最新A担图"
+    },
+    {
+      "type": "chat",
+      "昵称": "宁哥 麒麟",
+      "内容": "@_S这两个模型试过嘛"
+    },
+    {
+      "type": "time",
+      "time": "昨天22:05"
+    },
+    {
+      "type": "chat",
+      "昵称": "孙雅彬麒麟",
+      "内容": "今天看的就是第一个"
+    },
+    {
+      "type": "chat",
+      "昵称": "孙雅彬麒麟",
+      "内容": "第二个韵男跑过吗@安韵男"
+    },
+    {
+      "type": "chat",
+      "昵称": "安韻男麒麟",
+      "内容": "跑过，这个模型不可商用"
+    }
+  ],
+  "statistics": {
+    "nickname_messages": 6,
+    "time_messages": 2,
+    "my_messages": 0,
+    "group_name_messages": 0,
+    "retract_messages": 0,
+    "unknown_messages": 1
+  }
+}
