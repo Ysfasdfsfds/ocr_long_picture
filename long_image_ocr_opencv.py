@@ -127,15 +127,20 @@ class LongImageOCR:
         from process_avatar import preprocess_and_crop_image, slice_x_croped_values
         # 根据切片数量决定处理逻辑：
         # - 如果只有一个切片：包括所有
-        # - 如果大于1个切片：不包括最后一个切片
-        if len(slices_info) == 1:
+        # 根据切片数量确定处理策略
+        total_slices = len(slices_info)
+        if total_slices == 1:
             # 只有一个切片，处理所有切片
             slices_to_process = slices_info
             print("只有一个切片，将处理所有切片")
+        elif total_slices == 2:
+            # 两个切片，选择第一个切片
+            slices_to_process = slices_info[:1]
+            print("有2个切片，将只处理第一个切片")
         else:
-            # 多于一个切片，排除最后一个切片
-            slices_to_process = slices_info[:-1]
-            print(f"共有{len(slices_info)}个切片，将处理前{len(slices_to_process)}个切片（排除最后一个）")
+            # 大于等于3个切片，排除开始和结束的切片，只处理中间切片
+            slices_to_process = slices_info[1:-1]
+            print(f"共有{total_slices}个切片，将处理中间{len(slices_to_process)}个切片（排除第一个和最后一个）")
         
         for index,slice_info in enumerate(slices_to_process):
             img, binary, rects = preprocess_and_crop_image(slice_info['slice'], index, slice_info['start_y'])
@@ -216,6 +221,11 @@ class LongImageOCR:
                     break
         #计算x_croped的值，到这为止，x_croped的值已经计算出来了
         #-------------------------------------------------------------
+        
+        # 如果没有找到selected_box，设置默认的x_croped值
+        if 'x_croped' not in locals():
+            x_croped = None
+            print("警告: 未找到合适的框，x_croped设置为None")
              
         index = 0
         for slice_info in slices_info:
@@ -288,7 +298,12 @@ class LongImageOCR:
                 # 对头像裁图进行处理，目的是找到头像的坐标
                 print(f"分析切片 {slice_index} 的聊天消息...")
                 # slice_chat_result = self.analyze_slice_chat_messages(slice_ocr_result, slice_img, start_y)
-                slice_img = slice_img[0:slice_img.shape[0],0:x_croped]
+                # 如果x_croped为None，使用原图像；否则进行裁剪
+                if x_croped is not None:
+                    slice_img = slice_img[0:slice_img.shape[0],0:x_croped]
+                    print(f"切片 {slice_index} 使用x_croped={x_croped}进行裁剪")
+                else:
+                    print(f"切片 {slice_index} 未进行x裁剪，使用原始图像")
                 cv2.imwrite(f"./debug_images/slice_{slice_index:03d}_avatar.jpg", slice_img)
                 #输入的是slice_img的左侧头像截图 得到所有头像的外接矩形的坐标 xmin ymin w h
                 sliced_merged_result = process_avatar_v2(slice_img)
@@ -1861,6 +1876,66 @@ class LongImageOCR:
             print(f"检测绿色框时出错: {e}")
             return False
     
+    def _detect_blue_content_box(self, image: np.ndarray, box: List) -> bool:
+        """
+        检测文本框区域是否为蓝色背景（本人消息框）
+        
+        Args:
+            image: 原始图像
+            box: 文本框坐标
+            
+        Returns:
+            是否为蓝色框
+        """
+        try:
+            # 获取文本框区域
+            points = np.array(box, dtype=np.int32)
+            min_x = max(0, int(np.min(points[:, 0])))
+            max_x = min(image.shape[1], int(np.max(points[:, 0])))
+            min_y = max(0, int(np.min(points[:, 1])))
+            max_y = min(image.shape[0], int(np.max(points[:, 1])))
+            
+            if max_x <= min_x or max_y <= min_y:
+                return False
+            
+            # 提取区域图像
+            roi = image[min_y:max_y, min_x:max_x]
+            
+            if roi.size == 0:
+                return False
+            
+            # 转换为HSV颜色空间进行蓝色检测
+            hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+            
+            # 定义蓝色的HSV范围
+            # 蓝色范围（聊天界面中常见的蓝色）
+            lower_blue1 = np.array([100, 40, 40])   # 浅蓝色下限
+            upper_blue1 = np.array([130, 255, 255]) # 浅蓝色上限
+            
+            # 深蓝色范围
+            lower_blue2 = np.array([90, 50, 50])
+            upper_blue2 = np.array([120, 255, 255])
+            
+            # 创建蓝色掩码
+            mask1 = cv2.inRange(hsv, lower_blue1, upper_blue1)
+            mask2 = cv2.inRange(hsv, lower_blue2, upper_blue2)
+            mask = cv2.bitwise_or(mask1, mask2)
+            
+            # 计算蓝色像素的比例
+            blue_pixels = cv2.countNonZero(mask)
+            total_pixels = roi.shape[0] * roi.shape[1]
+            
+            if total_pixels > 0:
+                blue_ratio = blue_pixels / total_pixels
+                # 如果蓝色像素超过20%，认为是蓝色框
+                return blue_ratio > 0.2
+            
+            return False
+            
+        except Exception as e:
+            print(f"检测蓝色框时出错: {e}")
+            return False
+    
     def _calculate_box_iou(self, box1, box2):
         """
         计算两个矩形框的IoU (Intersection over Union)
@@ -2078,7 +2153,8 @@ class LongImageOCR:
                 continue
                 
             # 排除包含明显非时间关键词的文本
-            exclude_keywords = ['报送', '回执', '会议', '参加', '人员', '工作', '通知', '安排', '要求', '地点', '内容']
+            exclude_keywords = ['报送', '回执', '会议', '参加', '人员', '工作', '通知', '安排', '要求', '地点', '内容', 
+                              '完成', '需要', '前', '后', '开始', '结束', '传包', '表格', '填写', '更新', '自测']
             if any(keyword in text for keyword in exclude_keywords):
                 continue
             
@@ -2230,9 +2306,9 @@ class LongImageOCR:
                         break
     
     def _mark_green_content(self, ocr_results):
-        """标记绿色背景的内容（仅基于绿色检测）"""
+        """标记绿色和蓝色背景的内容（基于颜色检测）"""
         if self.original_image is None:
-            print("原图不可用，跳过绿色内容检测")
+            print("原图不可用，跳过颜色内容检测")
             return
         
         for ocr_item in ocr_results:
@@ -2246,10 +2322,20 @@ class LongImageOCR:
                 except Exception as e:
                     print(f"绿色检测失败: {e}")
                 
-                # 只有检测到绿色背景才标记为"我的内容"
+                # 基于蓝色背景检测
+                is_blue = False
+                try:
+                    is_blue = self._detect_blue_content_box(self.original_image, box)
+                except Exception as e:
+                    print(f"蓝色检测失败: {e}")
+                
+                # 绿色或蓝色背景都标记为"我的内容"
                 if is_green:
                     ocr_item['text'] = ocr_item['text'].replace("(内容)", "(我的内容)")
                     print(f"标记为我的内容: {ocr_item['text']} (原因: 绿色背景)")
+                elif is_blue:
+                    ocr_item['text'] = ocr_item['text'].replace("(内容)", "(我的内容)")
+                    print(f"标记为我的内容: {ocr_item['text']} (原因: 蓝色背景)")
 
     def get_summary_data(self) -> Dict:
         """
@@ -2724,7 +2810,8 @@ class LongImageOCR:
             return False
             
         # 排除包含明显非时间关键词的文本
-        exclude_keywords = ['报送', '回执', '会议', '参加', '人员', '工作', '通知', '安排', '要求', '地点', '内容']
+        exclude_keywords = ['报送', '回执', '会议', '参加', '人员', '工作', '通知', '安排', '要求', '地点', '内容', 
+                          '完成', '需要', '前', '后', '开始', '结束', '传包', '表格', '填写', '更新', '自测']
         if any(keyword in text for keyword in exclude_keywords):
             return False
         
@@ -2760,7 +2847,7 @@ def main():
     
     # 处理长图
     # image_path = r"images/image copy 3.png"
-    image_path = r"images/image copy 6.png"
+    image_path = r"images/image copy 15.png"
     
     try:
         result = processor.process_long_image(image_path)
