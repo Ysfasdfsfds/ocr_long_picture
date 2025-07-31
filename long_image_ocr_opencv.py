@@ -1846,6 +1846,21 @@ class LongImageOCR:
             
             # 提取区域图像
             roi = image[min_y:max_y, min_x:max_x]
+            # 保存ROI到本地，用于调试
+            debug_dir = Path("./output_images/debug")
+            debug_dir.mkdir(parents=True, exist_ok=True)
+            
+            # 生成唯一文件名，使用时间戳和随机数
+            import time
+            import random
+            timestamp = int(time.time() * 1000)
+            random_num = random.randint(1000, 9999)
+            roi_filename = f"roi_{timestamp}_{random_num}.jpg"
+            
+            # 保存ROI图像
+            roi_path = debug_dir / roi_filename
+            cv2.imwrite(str(roi_path), roi)
+            print(f"已保存ROI图像到: {roi_path}")
             
             if roi.size == 0:
                 return False
@@ -1907,28 +1922,38 @@ class LongImageOCR:
             # 转换为HSV颜色空间进行蓝色检测
             hsv = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
             
-            # 定义蓝色的HSV范围
-            # 蓝色范围（聊天界面中常见的蓝色）
-            lower_blue1 = np.array([100, 40, 40])   # 浅蓝色下限
-            upper_blue1 = np.array([130, 255, 255]) # 浅蓝色上限
-            
-            # 深蓝色范围
-            lower_blue2 = np.array([90, 50, 50])
-            upper_blue2 = np.array([120, 255, 255])
+            # 定义蓝色的HSV范围（聊天气泡常见的淡蓝色）
+            lower_blue = np.array([100, 30, 80])    # 降低饱和度下限，提高亮度下限
+            upper_blue = np.array([130, 180, 255])  # 降低饱和度上限，避免深蓝色文字
             
             # 创建蓝色掩码
-            mask1 = cv2.inRange(hsv, lower_blue1, upper_blue1)
-            mask2 = cv2.inRange(hsv, lower_blue2, upper_blue2)
-            mask = cv2.bitwise_or(mask1, mask2)
+            blue_mask = cv2.inRange(hsv, lower_blue, upper_blue)
             
-            # 计算蓝色像素的比例
-            blue_pixels = cv2.countNonZero(mask)
+            # 额外检查：排除白色背景上的蓝色文字
+            # 检测白色背景
+            lower_white = np.array([0, 0, 200])     # 白色HSV范围
+            upper_white = np.array([180, 30, 255])
+            white_mask = cv2.inRange(hsv, lower_white, upper_white)
+            
+            # 计算像素比例
+            blue_pixels = cv2.countNonZero(blue_mask)
+            white_pixels = cv2.countNonZero(white_mask)
             total_pixels = roi.shape[0] * roi.shape[1]
             
             if total_pixels > 0:
                 blue_ratio = blue_pixels / total_pixels
-                # 如果蓝色像素超过20%，认为是蓝色框
-                return blue_ratio > 0.2
+                white_ratio = white_pixels / total_pixels
+                
+                # 判断逻辑：
+                # 1. 蓝色比例要足够高(>30%)
+                # 2. 白色比例不能太高(<50%)，避免白底蓝字的情况
+                # 3. 蓝色比例要大于白色比例，确保是蓝底而不是白底
+                is_blue_background = (blue_ratio > 0.3 and 
+                                    white_ratio < 0.5 and 
+                                    blue_ratio > white_ratio)
+                
+                # print(f"蓝色检测 - 蓝色比例: {blue_ratio:.3f}, 白色比例: {white_ratio:.3f}, 判断为蓝色背景: {is_blue_background}")
+                return is_blue_background
             
             return False
             
@@ -2105,7 +2130,7 @@ class LongImageOCR:
         print(f"插入虚拟昵称后，OCR结果总数: {len(sorted_ocr)}")
         
         # 3. 标记绿色背景的内容为"我的内容"
-        self._mark_green_content(sorted_ocr)
+        self._mark_green_content(sorted_ocr, sorted_avatars)
         
         print("重新标记完成")
         return sorted_ocr  # 返回处理后的sorted_ocr，包含虚拟昵称
@@ -2195,12 +2220,12 @@ class LongImageOCR:
                 avatar_box_ = avatar_item['box']
                 x, y, w, h = avatar_box_
                 # 在原图上绘制矩形，使用红色(0,0,255)
-                cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                cv2.rectangle(debug_img, (x, y), (x + w, y + h), (0, 255, 0), 2)
                 # 在框旁边添加索引编号
                 cv2.putText(debug_img, f"{idx}:y={y}", (x, y-5), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
             
             # 保存带有头像框的图像
-            output_path = "output_images/avatars_marked.jpg"
+            output_path = "output_images/avatars_marked_1.jpg"
             cv2.imwrite(output_path, debug_img)
             print(f"已将所有头像框绘制到原图并保存至 {output_path}")
             self._avatars_drawn = True
@@ -2305,13 +2330,16 @@ class LongImageOCR:
                     elif next_box_y_min >= next_boundary:
                         break
     
-    def _mark_green_content(self, ocr_results):
-        """标记绿色和蓝色背景的内容（基于颜色检测）"""
+    def _mark_green_content(self, ocr_results, avatar_positions=None):
+        """标记绿色和蓝色背景的内容（基于颜色检测和位置推理）"""
         if self.original_image is None:
             print("原图不可用，跳过颜色内容检测")
             return
         
-        for ocr_item in ocr_results:
+        # 第一轮：基于颜色检测标记我的内容
+        my_content_boxes = []  # 存储已确认的我的内容框
+        
+        for i, ocr_item in enumerate(ocr_results):
             if "(内容)" in ocr_item['text']:
                 box = ocr_item['box']
                 
@@ -2332,10 +2360,160 @@ class LongImageOCR:
                 # 绿色或蓝色背景都标记为"我的内容"
                 if is_green:
                     ocr_item['text'] = ocr_item['text'].replace("(内容)", "(我的内容)")
+                    my_content_boxes.append({'index': i, 'box': box})
                     print(f"标记为我的内容: {ocr_item['text']} (原因: 绿色背景)")
                 elif is_blue:
                     ocr_item['text'] = ocr_item['text'].replace("(内容)", "(我的内容)")
+                    my_content_boxes.append({'index': i, 'box': box})
                     print(f"标记为我的内容: {ocr_item['text']} (原因: 蓝色背景)")
+        
+        # 第二轮：基于位置推理标记相邻的内容
+        self._mark_adjacent_my_content(ocr_results, my_content_boxes, avatar_positions)
+    
+    def _mark_adjacent_my_content(self, ocr_results, my_content_boxes, avatar_positions=None):
+        """
+        基于位置推理标记相邻的我的内容
+        
+        逻辑：如果通过颜色检测确定该条是我的内容，如果下一条：
+        1. 没有通过颜色检测
+        2. 处于最近的两个头像框之间（y1max --- y2min）
+        则下一条也是我的内容
+        """
+        # 使用传入的avatar_positions，如果没有则使用类属性
+        avatars = avatar_positions if avatar_positions is not None else self.all_avatar_positions_original
+        
+        print(f"开始位置推理：有 {len(my_content_boxes)} 个我的内容框，{len(avatars)} 个头像")
+        
+        if not my_content_boxes or not avatars:
+            print(f"跳过位置推理：my_content_boxes={len(my_content_boxes) if my_content_boxes else 0}, avatars={len(avatars) if avatars else 0}")
+            return
+        
+        for my_content in my_content_boxes:
+            my_index = my_content['index']
+            my_box = my_content['box']
+            my_x_min = self._get_box_x_min(my_box)
+            my_y_max = self._get_box_y_max(my_box)
+            
+            print(f"处理我的内容[{my_index}]: '{ocr_results[my_index]['text'][:50]}...', x_min={my_x_min}, y_max={my_y_max}")
+            
+            # 查找下一条内容
+            for next_index in range(my_index + 1, len(ocr_results)):
+                next_item = ocr_results[next_index]
+                
+                # 跳过已经标记为我的内容的
+                if "(我的内容)" in next_item['text']:
+                    print(f"  跳过[{next_index}]: 已是我的内容 - '{next_item['text'][:50]}...'")
+                    continue
+                
+                # 只处理内容标记
+                if "(内容)" not in next_item['text']:
+                    print(f"  跳过[{next_index}]: 不是内容标记 - '{next_item['text'][:50]}...'")
+                    continue
+                
+                next_box = next_item['box']
+                next_x_min = self._get_box_x_min(next_box)
+                next_y_min = self._get_box_y_min(next_box)
+                
+                print(f"  检查[{next_index}]: '{next_item['text'][:50]}...', x_min={next_x_min}, y_min={next_y_min}")
+                
+                # 检查是否已通过颜色检测（如果已通过，跳过）
+                try:
+                    is_green = self._detect_green_content_box(self.original_image, next_box)
+                    is_blue = self._detect_blue_content_box(self.original_image, next_box)
+                    if is_green or is_blue:
+                        print(f"    跳过: 已通过颜色检测 (绿色={is_green}, 蓝色={is_blue})")
+                        continue  # 已通过颜色检测，跳过
+                except Exception as e:
+                    print(f"    颜色检测异常: {e}")
+                    pass
+                
+                # 检查位置条件
+                print(f"    检查位置条件...")
+                if self._is_adjacent_my_content(my_box, next_box, avatars):
+                    next_item['text'] = next_item['text'].replace("(内容)", "(我的内容)")
+                    print(f"✅ 基于位置推理标记为我的内容: {next_item['text']} (xmin对齐且在头像范围内)")
+                    # 将新标记的内容也加入列表，以便继续检查下一条
+                    my_content_boxes.append({'index': next_index, 'box': next_box})
+                else:
+                    print(f"    ❌ 位置条件不满足")
+    
+    def _is_adjacent_my_content(self, my_box, next_box, avatars):
+        """
+        检查下一条内容是否应该标记为我的内容
+        
+        条件：
+        1. 处于最近的两个头像框之间
+        （已取消X坐标对齐限制）
+        """
+        my_x_min = self._get_box_x_min(my_box)
+        my_y_max = self._get_box_y_max(my_box)
+        
+        next_x_min = self._get_box_x_min(next_box)
+        next_y_min = self._get_box_y_min(next_box)
+        
+        # 1. X坐标检查已取消 - 只要在头像范围内即可
+        print(f"      X坐标信息: my_x={my_x_min}, next_x={next_x_min} (无限制)")
+        
+        # 2. 检查是否在最近的两个头像框之间
+        print(f"      Y坐标检查: my_y_max={my_y_max}, next_y_min={next_y_min}")
+        if not self._is_between_avatars(my_y_max, next_y_min, avatars):
+            print(f"      ❌ 不在头像范围内")
+            return False
+        
+        print(f"      ✅ 所有条件满足")
+        return True
+    
+    def _is_between_avatars(self, start_y, end_y, avatars):
+        """
+        检查Y坐标范围是否在最近的两个头像框之间
+        """
+        if not avatars:
+            return True  # 如果没有头像数据，允许通过
+        
+        # 按Y坐标排序头像
+        sorted_avatars = sorted(avatars, 
+                              key=lambda x: self._get_box_center_y(x['box']))
+        
+        # 找到包含start_y的头像对
+        for i in range(len(sorted_avatars) - 1):
+            avatar1 = sorted_avatars[i]
+            avatar2 = sorted_avatars[i + 1]
+            
+            avatar1_y_max = self._get_box_y_max(avatar1['box'])
+            avatar2_y_min = self._get_avatar_y_min(avatar2['box'])
+            
+            # 检查是否在这两个头像之间
+            if avatar1_y_max <= start_y and end_y <= avatar2_y_min:
+                return True
+        
+        return False
+    
+    def _get_box_x_min(self, box):
+        """获取文本框的最小X坐标"""
+        if isinstance(box, (tuple, list)) and len(box) == 4 and isinstance(box[0], (int, float)):
+            # 头像格式: (x, y, w, h)
+            return box[0]
+        else:
+            # OCR格式: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            return min(point[0] for point in box)
+    
+    def _get_box_y_max(self, box):
+        """获取文本框的最大Y坐标（底部）"""
+        if isinstance(box, (tuple, list)) and len(box) == 4 and isinstance(box[0], (int, float)):
+            # 头像格式: (x, y, w, h)
+            return box[1] + box[3]  # y + h
+        else:
+            # OCR格式: [[x1,y1], [x2,y2], [x3,y3], [x4,y4]]
+            return max(point[1] for point in box)
+    
+    def _get_avatar_y_min(self, box):
+        """获取头像框的最小Y坐标（顶部）"""
+        if isinstance(box, (tuple, list)) and len(box) == 4 and isinstance(box[0], (int, float)):
+            # 头像格式: (x, y, w, h)
+            return box[1]  # y
+        else:
+            # 如果是其他格式，返回最小Y
+            return min(point[1] for point in box)
 
     def get_summary_data(self) -> Dict:
         """
@@ -2564,13 +2742,36 @@ class LongImageOCR:
             
             # 处理我的内容标记
             if "(我的内容)" in text:
-                my_content = text.replace("(我的内容)", "").strip()
-                messages.append({
-                    "type": "my_chat",
-                    "昵称": "我",
-                    "内容": my_content
-                })
-                i += 1
+                my_content_parts = []
+                j = i
+                
+                # 收集连续的"我的内容"标记
+                while j < len(marked_texts):
+                    current_text = marked_texts[j].strip()
+                    if not current_text:
+                        j += 1
+                        continue
+                    
+                    if "(我的内容)" in current_text:
+                        content = current_text.replace("(我的内容)", "").strip()
+                        if content:
+                            my_content_parts.append(content)
+                        j += 1
+                    else:
+                        # 遇到非"我的内容"标记，停止收集
+                        break
+                
+                # 合并所有内容并创建消息
+                if my_content_parts:
+                    combined_content = " ".join(my_content_parts)
+                    messages.append({
+                        "type": "my_chat",
+                        "昵称": "我",
+                        "内容": combined_content
+                    })
+                
+                # 跳过已处理的内容
+                i = j
                 continue
             
             # 处理昵称标记
@@ -2847,7 +3048,7 @@ def main():
     
     # 处理长图
     # image_path = r"images/image copy 3.png"
-    image_path = r"images/image copy 15.png"
+    image_path = r"images/image copy 11.png"
     
     try:
         result = processor.process_long_image(image_path)

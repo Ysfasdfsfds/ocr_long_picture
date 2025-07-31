@@ -87,35 +87,32 @@ def extract_contours_and_rects(binary_img, img):
             return 0.9 <= ratio <= 1.1 or 0.9 <= (1/ratio) <= 1.1
 
         if rects:
-            # 取所有x坐标
+            # 1. 取所有x坐标并排序，找到前三个不同的x坐标值
             x_list = [r[0] for r in rects]
-            x_arr = np.array(x_list)
-            # 找最左侧x
-            min_x = np.min(x_arr)
-            # 找所有x等于min_x的框
-            leftmost_rects = [r for r in rects if r[0] == min_x]
-            # 判断这些框是否都严格逼近正方形
-            if leftmost_rects and all(is_strict_square(r) for r in leftmost_rects):
-                # 选面积最大的
-                target_box = max(leftmost_rects, key=lambda r: r[2]*r[3])
+            unique_x = sorted(set(x_list))
+            
+            # 取前三个x坐标值（如果不足3个就取全部）
+            top_3_x = unique_x[:3]
+            print(f"左侧前三个x坐标值: {top_3_x}")
+            
+            # 2. 挑选出左侧前三的所有框（包括x坐标相等的框）
+            left_top3_rects = [r for r in rects if r[0] in top_3_x]
+            print(f"左侧前三的框总数: {len(left_top3_rects)}")
+            
+            # 3. 筛选掉不严格趋于正方形的框
+            square_rects = [r for r in left_top3_rects if is_strict_square(r)]
+            print(f"严格趋于正方形的框数量: {len(square_rects)}")
+            
+            # 4. 在剩余框中选择面积最大的作为target_box
+            if square_rects:
+                target_box = max(square_rects, key=lambda r: r[2] * r[3])
                 x_croped = target_box[0] + target_box[2] + 3
+                print(f"选中的target_box: x={target_box[0]}, y={target_box[1]}, w={target_box[2]}, h={target_box[3]}, 面积={target_box[2]*target_box[3]}")
             else:
-                # 找左侧第二小x
-                unique_x = sorted(set(x_list))
-                if len(unique_x) >= 2:
-                    second_min_x = unique_x[1]
-                    second_left_rects = [r for r in rects if r[0] == second_min_x]
-                    if second_left_rects and all(is_strict_square(r) for r in second_left_rects):
-                        target_box = max(second_left_rects, key=lambda r: r[2]*r[3])
-                        x_croped = target_box[0] + target_box[2] + 3
-                    else:
-                        # 降级为原逻辑：取最左侧的框
-                        target_box = min(rects, key=lambda r: r[0])
-                        x_croped = target_box[0] + target_box[2]
-                else:
-                    # 只有一个x，降级为原逻辑
-                    target_box = min(rects, key=lambda r: r[0])
-                    x_croped = target_box[0] + target_box[2] + 3
+                # 降级处理：如果没有严格正方形的框，从所有框中选择最左侧的
+                print("警告: 没有找到严格趋于正方形的框，降级为选择最左侧的框")
+                target_box = min(rects, key=lambda r: r[0])
+                x_croped = target_box[0] + target_box[2] + 3
             # img_square = img.copy()
             # 将用于形成x_croped的target_box画出来
             # target_boxes.append(target_box)
@@ -472,14 +469,14 @@ def preprocess_and_crop_image_v2(image_path):
     
     # 提取轮廓和外接矩形
     rects, x_croped, target_box = extract_contours_and_rects(binary, img)
-    print(f"检测到 {len(rects)} 个候选区域")
+    # print(f"检测到 {len(rects)} 个候选区域")
     
-    # 存储每个slice的x_croped值
-    # slice_x_croped_values[index] = target_box
-    # print(f"Slice {index} 的x_croped值: {x_croped}")
+    # # 存储每个slice的x_croped值
+    # # slice_x_croped_values[index] = target_box
+    # # print(f"Slice {index} 的x_croped值: {x_croped}")
 
-    croped_image = img[0:img.shape[0], 0:x_croped]
-    cv2.imwrite("output_images/croped_image_ori.jpg", croped_image)
+    # croped_image = img[0:img.shape[0], 0:x_croped]
+    # cv2.imwrite("output_images/croped_image_ori.jpg", croped_image)
 
     
     return rects
