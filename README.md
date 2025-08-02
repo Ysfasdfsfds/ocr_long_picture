@@ -1,0 +1,1 @@
+运行long_image_ocr_opencv.py
