@@ -3,6 +3,7 @@
 """
 重构后的OCR长图处理器
 实现模块化设计，保证输出结果与原版一致
+清理版本：移除了复杂的LLM交互循环和冗余的调试输出，保留核心OCR功能
 """
 
 import os
@@ -10,9 +11,8 @@ import json
 import cv2
 import numpy as np
 from pathlib import Path
-from typing import List, Dict, Tuple, Any, Optional
+from typing import List, Dict, Tuple, Optional
 from rapidocr import RapidOCR
-import math
 import shutil
 from LLM_run import process_with_llm
 import re
@@ -76,7 +76,7 @@ class ImageProcessor:
 class OCRProcessor:
     """OCR处理模块：专门处理OCR识别"""
     
-    def __init__(self, config_path: str = "./default_rapidocr.yaml", text_score_threshold: float = 0.65):
+    def __init__(self, config_path: str = "./config/default_rapidocr.yaml", text_score_threshold: float = 0.65):
         self.engine = RapidOCR(config_path=config_path)
         self.text_score_threshold = text_score_threshold
     
@@ -995,12 +995,7 @@ class ResultExporter:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         
-        print(f"标记后的OCR结果已导出到: {output_path}")
-        print(f"  - 时间标记: {time_count} 项")
-        print(f"  - 昵称标记: {nickname_count} 项") 
-        print(f"  - 内容标记: {content_count} 项")
-        print(f"  - 我的内容: {my_content_count} 项")
-        print(f"  - 未标记: {export_data['statistics']['unmarked_items']} 项")
+        print(f"OCR结果已导出: {output_path} (共{len(text_results)}项)")
         
         return str(output_path)
     
@@ -1038,13 +1033,7 @@ class ResultExporter:
         with open(output_path, 'w', encoding='utf-8') as f:
             json.dump(export_data, f, ensure_ascii=False, indent=2)
         
-        print(f"结构化聊天消息已导出到: {output_path}")
-        print(f"  - 普通聊天消息: {nickname_messages} 条")
-        print(f"  - 时间消息: {time_messages} 条")
-        print(f"  - 我的消息: {my_messages} 条")
-        print(f"  - 群聊名称: {group_name_messages} 条")
-        print(f"  - 撤回消息: {retract_messages} 条")
-        print(f"  - 未知内容: {unknown_messages} 条")
+        print(f"聊天消息已导出: {output_path} (共{len(structured_messages)}条)")
         
         return export_data
 
@@ -1052,7 +1041,7 @@ class ResultExporter:
 class RefactoredLongImageOCR:
     """重构后的长图OCR处理器主类"""
     
-    def __init__(self, config_path: str = "./default_rapidocr.yaml"):
+    def __init__(self, config_path: str = "./config/default_rapidocr.yaml"):
         self.config_path = config_path
         
         # 创建输出目录
@@ -1157,21 +1146,16 @@ class RefactoredLongImageOCR:
         self.result_exporter.export_marked_ocr_results(marked_ocr_results)
         llm_input = self.result_exporter.export_structured_chat_messages(structured_messages)
         
-        # 8. LLM交互
-        print("步骤8: 进入LLM交互模式...")
-        while True:
-            user_question = input("请输入你想问的问题（输入'退出'结束）：")
-            if user_question.strip() in ["退出", "q", "Q", "exit"]:
-                print("已退出与ollama模型的交互。")
-                break
-            process_with_llm(user_question, llm_input["chat_messages"])
+        # 8. LLM交互 (可选)
+        print("步骤8: LLM处理完成，可通过 process_with_llm() 进行交互")
+        # 如需交互，可调用: process_with_llm(question, llm_input["chat_messages"])
         
         return llm_input
 
 
 def main():
     """主函数"""
-    processor = RefactoredLongImageOCR(config_path="./default_rapidocr.yaml")
+    processor = RefactoredLongImageOCR(config_path="./config/default_rapidocr.yaml")
     image_path = r"images/image_2.png"
     
     try:
